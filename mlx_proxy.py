@@ -80,7 +80,7 @@ async def kill_backend():
     state["loaded_at"] = None
 
 
-async def wait_for_backend(timeout: float = 60.0):
+async def wait_for_backend(timeout: float = 600.0):
     """バックエンドが起動するまで待つ"""
     deadline = time.time() + timeout
     async with httpx.AsyncClient() as client:
