@@ -81,7 +81,7 @@ curl http://localhost:8080/v1/models
     {
       "id": "mlx-community/Qwen3.5-9B-MLX-4bit",
       "object": "model",
-      "path": "/Volumes/SanDiskSSD/LM_Studio_Models/mlx-community/Qwen3.5-9B-MLX-4bit",
+      "path": "/Volumes/MySSD/LM_Studio_Models/mlx-community/Qwen3.5-9B-MLX-4bit",
       "loaded": false
     },
     ...
@@ -221,7 +221,7 @@ curl http://localhost:8080/health
         ↓ :18080 (MLX_BACKEND_PORT)
   mlx_lm.server (MLXバックエンド)
         ↓
-  /Volumes/SanDiskSSD/LM_Studio_Models/
+  /Volumes/MySSD/LM_Studio_Models/
 ```
 
 モデルのロード時にバックエンドプロセスを再起動することでモデル切り替えを実現しています。
