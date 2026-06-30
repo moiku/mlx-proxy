@@ -57,6 +57,8 @@ state: dict = {
     "vlm_model": None,        # mlx_vlm model
     "vlm_processor": None,    # mlx_vlm processor
     "vlm_config": None,       # mlx_vlm config
+    "vlm_draft_model": None,  # MTP drafter (mlx_vlm speculative decoding)
+    "vlm_draft_kind": None,   # drafter kind ("mtp", "dflash", etc.)
     # Score モード
     "score_model": None,      # mlx_lm model
     "score_tokenizer": None,  # mlx_lm tokenizer (TokenizerWrapper)
@@ -116,6 +118,8 @@ async def kill_backend():
     state["vlm_model"] = None
     state["vlm_processor"] = None
     state["vlm_config"] = None
+    state["vlm_draft_model"] = None
+    state["vlm_draft_kind"] = None
 
     # Score モード: モデル参照を解放
     state["score_model"] = None
@@ -189,8 +193,11 @@ async def start_backend(model_path: str, enable_thinking: bool):
         raise RuntimeError(f"mlx_lm.server の起動がタイムアウトしました: {model_path}")
 
 
-async def start_vlm_backend(model_path: str, enable_thinking: bool):
-    """VLM モード: mlx_vlm でモデルをインプロセスにロード"""
+async def start_vlm_backend(model_path: str, enable_thinking: bool,
+                            draft_model_id: str = None, draft_kind: str = None):
+    """VLM モード: mlx_vlm でモデルをインプロセスにロード。
+    draft_model_id を指定すると MTP/dflash ドラフターも同時にロードする。
+    """
     await kill_backend()
 
     from mlx_vlm import load as vlm_load
@@ -200,9 +207,27 @@ async def start_vlm_backend(model_path: str, enable_thinking: bool):
     model, processor = await loop.run_in_executor(None, vlm_load, model_path)
     config = await loop.run_in_executor(None, vlm_load_config, model_path)
 
+    draft_model_obj = None
+    resolved_kind = draft_kind
+    if draft_model_id:
+        # ドラフターパスを解決（short_name or フルパス）
+        models = find_all_models()
+        draft_path = draft_model_id
+        for m in models:
+            if draft_model_id in (m["id"], m["short_name"], m["path"]):
+                draft_path = m["path"]
+                break
+
+        from mlx_vlm.speculative.drafters import load_drafter, DRAFTER_KIND_BY_MODEL_TYPE
+        draft_model_obj, resolved_kind = await loop.run_in_executor(
+            None, lambda: load_drafter(draft_path, kind=draft_kind)
+        )
+
     state["vlm_model"] = model
     state["vlm_processor"] = processor
     state["vlm_config"] = config
+    state["vlm_draft_model"] = draft_model_obj
+    state["vlm_draft_kind"] = resolved_kind
     state["model_id"] = model_path
     state["enable_thinking"] = enable_thinking
     state["mode"] = "vlm"
@@ -233,6 +258,8 @@ class LoadRequest(BaseModel):
     model_id: str                          # パス or short_name
     enable_thinking: bool = False          # デフォルトはthinking off
     mode: str = "llm"                      # "llm" | "vlm" | "score"
+    draft_model_id: Optional[str] = None  # VLMモード専用: MTPドラフターのパス or short_name
+    draft_kind: Optional[str] = None      # VLMモード専用: "mtp" | "dflash" | "eagle3" (省略時は自動判定)
 
 
 @app.get("/v1/models")
@@ -285,7 +312,9 @@ async def load_model(req: LoadRequest):
 
     try:
         if req.mode == "vlm":
-            await start_vlm_backend(resolved, req.enable_thinking)
+            await start_vlm_backend(resolved, req.enable_thinking,
+                                    draft_model_id=req.draft_model_id,
+                                    draft_kind=req.draft_kind)
         elif req.mode == "score":
             await start_score_backend(resolved)
         else:
@@ -379,6 +408,8 @@ def _vlm_generate_sync(body: dict) -> dict:
     processor = state["vlm_processor"]
     config = state["vlm_config"]
     enable_thinking = state["enable_thinking"]
+    draft_model = state["vlm_draft_model"]
+    draft_kind = state["vlm_draft_kind"]
 
     num_images = len(images)
     prompt = apply_chat_template(
@@ -389,15 +420,22 @@ def _vlm_generate_sync(body: dict) -> dict:
 
     img_arg = images[0] if len(images) == 1 else (images if images else None)
 
-    t0 = time.time()
-    out = vlm_generate(
-        model, processor, prompt,
-        image=img_arg,
+    generate_kwargs = dict(
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
         seed=seed,
         verbose=False,
+    )
+    if draft_model is not None:
+        generate_kwargs["draft_model"] = draft_model
+        generate_kwargs["draft_kind"] = draft_kind
+
+    t0 = time.time()
+    out = vlm_generate(
+        model, processor, prompt,
+        image=img_arg,
+        **generate_kwargs,
     )
     elapsed = time.time() - t0
 
@@ -830,7 +868,7 @@ async def health():
                     backend_ok = r.status_code == 200
             except Exception:
                 pass
-    return {
+    result = {
         "proxy": "ok",
         "backend": "ok" if backend_ok else "not_running",
         "model_id": state["model_id"],
@@ -838,6 +876,9 @@ async def health():
         "mode": state["mode"],
         "mcp_tools": len(_mcp_tools),
     }
+    if state["vlm_draft_model"] is not None:
+        result["draft_kind"] = state["vlm_draft_kind"]
+    return result
 
 
 # ============================================================
